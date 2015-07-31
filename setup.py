@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 from setuptools import setup, find_packages
-import os, re
+import os
+import re
 
 PKG='oauth2'
 VERSIONFILE = os.path.join('oauth2', '_version.py')
@@ -40,6 +41,7 @@ setup(name=PKG,
         "Programming Language :: Python :: 3",
         "Programming Language :: Python :: 3.2",
         "Programming Language :: Python :: 3.3",
+        "Programming Language :: Python :: 3.4",
         "Programming Language :: Python :: Implementation :: CPython",
       ],
       packages = find_packages(),

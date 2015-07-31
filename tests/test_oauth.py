@@ -26,6 +26,9 @@ THE SOFTWARE.
 import random
 import time
 import unittest
+import urllib
+import os
+import sys
 
 import httplib2
 import mock
@@ -40,6 +43,7 @@ from oauth2._compat import parse_qsl
 from oauth2._compat import u
 
 import oauth2 as oauth
+sys.path[0:0] = [os.path.join(os.path.dirname(__file__), "..")]
 
 _UEMPTY = u('')
 _UBLANK = u(' ')
@@ -447,6 +451,60 @@ class TestRequest(unittest.TestCase, ReallyEqualMixin):
         req = oauth.Request("GET", "http://example.com", params)
         self.assertEqual(other_params, req.get_nonoauth_parameters())
 
+    def test_to_url_nonascii(self):
+        url = "http://sp.example.com/"
+
+        params = {
+            'nonasciithing': b'q\xbfu\xe9 ,aasp u?..a.s',
+            'oauth_version': "1.0",
+            'oauth_nonce': "4572616e48616d6d65724c61686176",
+            'oauth_timestamp': "137131200",
+            'oauth_consumer_key': "0685bd9184jfhq22",
+            'oauth_signature_method': "HMAC-SHA1",
+            'oauth_token': "ad180jjd733klru7",
+            'oauth_signature': "wOJIO9A2W5mFwDgiDvZbTSMK%2FPY%3D",
+        }
+
+        req = oauth.Request("GET", url, params)
+        res = urlparse(req.to_url())
+
+        params['nonasciithing'] = params['nonasciithing'].encode('utf-8')
+        exp = urlparse("%s?%s" % (url, urlencode(params)))
+
+        self.assertEquals(exp.netloc, res.netloc)
+        self.assertEquals(exp.path, res.path)
+
+        a = parse_qs(exp.query)
+        b = parse_qs(res.query)
+        self.assertEquals(a, b)
+
+    def test_to_url_works_with_non_ascii_parameters(self):
+
+        oauth_params = {
+            'oauth_consumer': 'asdfasdfasdf'
+        }
+
+        other_params = {
+            u'foo': u'baz',
+            u'bar': u'foo',
+            u'multi': [u'FOO',u'BAR'],
+            u'uni_utf8': u'\xae',
+            u'uni_unicode': u'\u00ae',
+            u'uni_unicode_2': u'åÅøØ',
+        }
+
+        params = oauth_params
+        params.update(other_params)
+
+        req = oauth.Request("GET", "http://example.com", params)
+        self.assertEqual(req.to_url().split("?", 1)[0], "http://example.com")
+        res = set(req.to_url().split("?", 1)[1].split("&"))
+        exp = set(['oauth_consumer=asdfasdfasdf',
+                   'uni_unicode_2=%C3%A5%C3%85%C3%B8%C3%98',
+                   'uni_utf8=%C2%AE', 'multi=%5B%27FOO%27%2C+%27BAR%27%5D',
+                   'uni_unicode=%C2%AE', 'bar=foo', 'foo=baz'])
+        self.assertEquals(res, exp)
+
     def test_to_header(self):
         realm = "http://sp.example.com/"
 
@@ -548,9 +606,10 @@ class TestRequest(unittest.TestCase, ReallyEqualMixin):
         req = oauth.Request("GET", url, params)
         exp = urlparse("%s?%s" % (url, urlencode(params)))
         res = urlparse(req.to_url())
-        self.assertEqual(exp.scheme, res.scheme)
-        self.assertEqual(exp.netloc, res.netloc)
-        self.assertEqual(exp.path, res.path)
+        # TODO should these all be unicode?
+        self.assertEqual(exp.scheme, oauth.to_unicode(res.scheme))
+        self.assertEqual(exp.netloc, oauth.to_unicode(res.netloc))
+        self.assertEqual(exp.path, oauth.to_unicode(res.path))
 
         exp_parsed = parse_qs(exp.query)
         res_parsed = parse_qs(res.query)
@@ -699,6 +758,18 @@ class TestRequest(unittest.TestCase, ReallyEqualMixin):
 
         self.assertEqual(expected, res)
 
+    def test_get_normalized_parameters_multiple(self):
+        url = "http://example.com/v2/search/videos?oauth_nonce=79815175&oauth_timestamp=1295397962&oauth_consumer_key=mykey&oauth_signature_method=HMAC-SHA1&oauth_version=1.0&offset=10&oauth_signature=spWLI%2FGQjid7sQVd5%2FarahRxzJg%3D&tag=one&tag=two"
+
+        req = oauth.Request("GET", url)
+
+        res = req.get_normalized_parameters()
+
+        expected='oauth_consumer_key=mykey&oauth_nonce=79815175&oauth_signature_method=HMAC-SHA1&oauth_timestamp=1295397962&oauth_version=1.0&offset=10&tag=one&tag=two'
+
+        self.assertEquals(expected, res)
+
+
     def test_get_normalized_parameters_from_url(self):
         # example copied from
         # https://github.com/ciaranj/node-oauth/blob/master/tests/oauth.js
@@ -805,6 +876,13 @@ class TestRequest(unittest.TestCase, ReallyEqualMixin):
         foo = params.copy()
         del foo["oauth_signature"]
         self.assertEqual(urlencode(sorted(foo.items())), res)
+
+    def test_signature_base_string_with_matrix_params(self):
+        url = "http://social.yahooapis.com/v1/user/6677/connections;start=0;count=20"
+        req = oauth.Request("GET", url, None)
+        # TODO should these have params (ie. ?)
+        # self.assertEquals(req.normalized_url, 'http://social.yahooapis.com/v1/user/6677/connections;start=0;count=20')
+        # self.assertEquals(req.url, 'http://social.yahooapis.com/v1/user/6677/connections;start=0;count=20')
 
     def test_set_signature_method(self):
         consumer = oauth.Consumer('key', 'secret')
@@ -1019,6 +1097,63 @@ class TestRequest(unittest.TestCase, ReallyEqualMixin):
         req.sign_request(oauth.SignatureMethod_HMAC_SHA1(), con, tok)
         self.assertEqual(
             req['oauth_signature'], b'IBw5mfvoCsDjgpcsVKbyvsDqQaU=')
+
+
+    def test_from_request_works_with_wsgi(self):
+        """Make sure WSGI header HTTP_AUTHORIZATION is detected correctly."""
+        url = "http://sp.example.com/"
+
+        params = {
+            'oauth_version': "1.0",
+            'oauth_nonce': "4572616e48616d6d65724c61686176",
+            'oauth_timestamp': "137131200",
+            'oauth_consumer_key': "0685bd9184jfhq22",
+            'oauth_signature_method': "HMAC-SHA1",
+            'oauth_token': "ad180jjd733klru7",
+            'oauth_signature': "wOJIO9A2W5mFwDgiDvZbTSMK%2FPY%3D",
+        }
+
+        req = oauth.Request("GET", url, params)
+        headers = req.to_header()
+
+        # Munge the headers
+        headers['HTTP_AUTHORIZATION'] = headers['Authorization']
+        del headers['Authorization']
+
+        # Test from the headers
+        req = oauth.Request.from_request("GET", url, headers)
+        self.assertEquals(req.method, "GET")
+        self.assertEquals(req.url, url)
+        self.assertEquals(params, req.copy())
+
+
+    def test_from_request_is_case_insensitive_checking_for_auth(self):
+        """Checks for the Authorization header should be case insensitive."""
+        url = "http://sp.example.com/"
+
+        params = {
+            'oauth_version': "1.0",
+            'oauth_nonce': "4572616e48616d6d65724c61686176",
+            'oauth_timestamp': "137131200",
+            'oauth_consumer_key': "0685bd9184jfhq22",
+            'oauth_signature_method': "HMAC-SHA1",
+            'oauth_token': "ad180jjd733klru7",
+            'oauth_signature': "wOJIO9A2W5mFwDgiDvZbTSMK%2FPY%3D",
+        }
+
+        req = oauth.Request("GET", url, params)
+        headers = req.to_header()
+
+        # Munge the headers
+        headers['authorization'] = headers['Authorization']
+        del headers['Authorization']
+
+        # Test from the headers
+        req = oauth.Request.from_request("GET", url, headers)
+        self.assertEquals(req.method, "GET")
+        self.assertEquals(req.url, url)
+        self.assertEquals(params, req.copy())
+
 
     def test_from_request(self):
         url = "http://sp.example.com/"
@@ -1397,6 +1532,18 @@ class TestClient(unittest.TestCase):
         except ValueError:
             pass
 
+    def test_init_passes_kwargs_to_httplib2(self):
+        class Blah():
+            pass
+
+        consumer = oauth.Consumer('token', 'secret')
+
+        # httplib2 options
+        client = oauth.Client(consumer, None, cache='.cache', timeout=3, disable_ssl_certificate_validation=True)
+        self.assertNotEquals(client.cache, None)
+        self.assertEquals(client.timeout, 3)
+
+
     def test_access_token_get(self):
         """Test getting an access token via GET."""
         client = oauth.Client(self.consumer, None)
@@ -1446,7 +1593,7 @@ class TestClient(unittest.TestCase):
 
         def mockrequest(cl, ur, **kw):
             self.assertTrue(cl is client)
-            self.assertTrue(ur is uri)
+            self.assertEqual(ur, uri)
             self.assertEqual(frozenset(kw.keys()),
                                  frozenset(['method', 'body', 'redirections',
                                             'connection_type', 'headers']))
@@ -1488,13 +1635,12 @@ class TestClient(unittest.TestCase):
                     http_method='GET', http_url=uri, parameters={})
             req.sign_request(oauth.SignatureMethod_HMAC_SHA1(),
                              self.consumer, None)
-            expected = parse_qsl(
-                            urlparse(req.to_url()).query)
+            expected = parse_qsl(oauth.to_unicode(urlparse(req.to_url()).query))
             actual = parse_qsl(urlparse(ur).query)
             self.assertEqual(len(expected), len(actual))
             actual = dict(actual)
             for key, value in expected:
-                if key not in ('oauth_signature',
+                if key not in ('oauth_signature', 'oauth_version',
                                'oauth_nonce', 'oauth_timestamp'):
                     self.assertEqual(actual[key], value)
 
