@@ -5,3 +5,6 @@
 coverage.xml
 nosetests.xml
 .tox
+build
+dist
+
